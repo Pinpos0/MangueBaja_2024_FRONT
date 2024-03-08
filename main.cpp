@@ -9,6 +9,9 @@
 #include "front_defs.h"
 #include "FIR.h"
 
+//#define FRONT_WHEEL
+#define REAR_WHEEL
+
 /* Communication Protocols */
 CAN can(PB_8, PB_9, 1000000);       // RD, TD, Frequency
 Serial serial(PA_2, PA_3, 115200);  // TX, RX, Baudrate
@@ -16,9 +19,9 @@ LSM6DS3 LSM6DS3(PB_7, PB_6);        // SDA, SCL
 //RFM69 radio(PB_15/*mosi*/, PB_14/*miso*/, PB_13/*sclk*/, PB_12/*CS*/, PA_8/*Interrupt*/); 
 
 /* I/O pins */
-//DigitalIn acopl_4x4(PA_0, PullNone);
+InterruptIn freq_speed(PB_1, PullNone);
 InterruptIn acopl_4x4(PA_0, PullDown);
-InterruptIn freq_sensor(PB_4, PullNone);
+InterruptIn freq_rpm(PB_4, PullNone);
 InterruptIn choke_switch(PA_7, PullUp);     // servomotor CHOKE mode
 InterruptIn run_switch(PA_5, PullUp);       // servomotor RUN mode
 DigitalOut led(PC_13);
@@ -49,12 +52,16 @@ bool switch_clicked = false;
 bool button_clicked = false;
 uint8_t array_data[sizeof(Txtmng)];
 uint8_t imu_failed = 0;                      // number of times before a new connection attempt with imu 
-uint8_t pulse_counter = 0, sot = 0x00;
+uint8_t pulse_counterrpm = 0, pulse_counterspeed = 0, sot = 0x00;
+uint16_t speed_display = 0;
 uint16_t dt = 0;
 uint32_t imu_last_acq = 0;
 uint64_t last_acq = 0;
-uint64_t current_period = 0, last_count = 0;
+uint64_t current_periodrpm = 0, last_countrpm = 0;
+uint64_t current_periodspeed = 0, last_countspeed = 0;
+uint16_t speed_filt = 0;
 float rpm_hz;
+float speed_hz = 0;
 
 /* Interrupt handlers */
 void canHandler();
@@ -62,7 +69,8 @@ void throttleDebounceHandler();
 void ButtonDebouceHandler();
 /* Interrupt services routine */
 void canISR();
-void frequencyCounterISR();
+void freqCounterISRspeed();
+void freqCounterISRrpm();
 void servoSwitchISR();
 void Button4x4ISR();
 void ticker1HzISR();
@@ -91,6 +99,7 @@ int main ()
     /* Main variables */
     CANMsg txMsg; 
     /* Initialization */
+    db = 0;                                                    //debug initialization
     t.start();
     //horn = horn_button.read();                               // horn OFF
     //headlight = headlight_switch.read();                     // headlight OFF
@@ -124,6 +133,40 @@ int main ()
             case IDLE_ST:
                 //serial.printf("idle\r\n");
                 //Thread::wait(2);
+                break;
+
+            case SPEED_ST:
+                //serial.printf("speed\r\n");
+
+                freq_speed.fall(NULL);         // disable interrupt
+
+                if (current_periodspeed!=0)
+                {
+                    speed_hz = 1000000*((float)(pulse_counterspeed)/current_periodspeed);    //calculates frequency in Hz
+                } 
+                
+                else 
+                {
+                    speed_hz = 0;
+                }
+
+                #ifdef FRONT_WHEEL
+                    speed_display = ((float)(3.6*PI*WHEEL_DIAMETER*speed_hz)/WHEEL_HOLES_NUMBER_FRONT);    // make conversion hz to km/h
+                #endif
+
+                #ifdef REAR_WHEEL
+                    speed_display = ((float)(3.6*PI*WHEEL_DIAMETER*speed_hz)/WHEEL_HOLES_NUMBER_REAR);    // make conversion hz to km/h
+                #endif
+
+                //speed_radio = ((float)((speed_display)/60.0)*65535);
+                speed_filt = (uint16_t)filter.filt(speed_display);
+
+                /* re-init the counter */
+                pulse_counterspeed = 0;                          
+                current_periodspeed = 0;                         //|-> reset pulses related variables
+                last_countspeed = t.read_us();        
+                freq_speed.fall(&freqCounterISRspeed);     // enable interrupt                
+
                 break;
 
             case IMU_ST:
@@ -188,13 +231,13 @@ int main ()
 
             case RPM_ST:
                 //  serial.printf("rpm\r\n");
-                freq_sensor.fall(NULL);         // disable interrupt
+                freq_rpm.fall(NULL);         // disable interrupt
 
-                if(current_period!=0) 
+                if(current_periodrpm!=0) 
                 {
                     //rpm_hz = ((float)pulse_counter/(current_period/1000000.0));    //calculates frequency in Hz
                     //if (switch_state != CHOKE_MODE)
-                    rpm_hz = pulse_counter*5*60;
+                    rpm_hz = pulse_counterrpm*5*60;
                     
                     /* Send CHOKE MODE message */
                     txMsg.clear(THROTTLE_ID);
@@ -220,10 +263,10 @@ int main ()
                 can.write(txMsg);
 
                 /* prepare to re-init RPM counter */
-                pulse_counter = 0;
-                current_period = 0;                                   // reset pulses related variables
-                last_count = t.read_us();
-                freq_sensor.fall(&frequencyCounterISR);               // enable interrupt
+                pulse_counterrpm = 0;
+                current_periodrpm = 0;                                   // reset pulses related variables
+                last_countrpm = t.read_us();
+                freq_rpm.fall(&freqCounterISRrpm);               // enable interrupt
 
                 break;
 
@@ -236,13 +279,13 @@ int main ()
                     if(acopl_4x4.read())
                     {
                         sot |= 0x02;
-                        db = 1;
+//                      db = 1;
                     }
 
                     else
                     {
                         sot &= ~0x02;
-                        db = 0;
+//                      db = 0;
                     }
 
                     button_clicked = false;
@@ -375,24 +418,25 @@ int main ()
 
             case DISPLAY_ST:
                 //serial.printf("display\r\n"); 
-                displayData(data.speed, RPM, data.tempMOTOR, /*data.fuel,*/ data.tempCVT, data.soc, sot);
+                displayData(speed_filt, RPM, data.tempMOTOR, /*data.fuel,*/ data.tempCVT, data.soc, sot);
                 break;
 
             case DEBUG_ST:
-                //serial.printf("Debug state\r\n");
-                //serial.printf("Accx = %d\r\n", LSM6DS3.ax_raw);
-                //serial.printf("Accy = %d\r\n", LSM6DS3.ay_raw);
-                //serial.printf("Accz = %d\r\n", LSM6DS3.az_raw);
-                //serial.printf("DPSx = %d\r\n", LSM6DS3.gx_raw);
-                //serial.printf("DPSy = %d\r\n", LSM6DS3.gy_raw);
-                //serial.printf("DPSz = %d\r\n", LSM6DS3.gz_raw);
-                //serial.printf("Angle Roll = %d\r\n", angle_roll);
-                //serial.printf("Angle Pitch = %d\r\n", angle_pitch);
-                //serial.printf("RPM = %d\r\n", RPM);
-                //serial.printf("4x4 = %d\r\n", acopl_4x4.read());
-                //serial.printf("switch state = %d\r\n", switch_state);
-                //serial.printf("flags = %d\r\n", flags);
-                //serial.printf("\n\n\n");
+                serial.printf("Debug state\r\n");
+                serial.printf("Speed = %d\r\n", speed_filt);
+                serial.printf("Accx = %d\r\n", LSM6DS3.ax_raw);
+                serial.printf("Accy = %d\r\n", LSM6DS3.ay_raw);
+                serial.printf("Accz = %d\r\n", LSM6DS3.az_raw);
+                serial.printf("DPSx = %d\r\n", LSM6DS3.gx_raw);
+                serial.printf("DPSy = %d\r\n", LSM6DS3.gy_raw);
+                serial.printf("DPSz = %d\r\n", LSM6DS3.gz_raw);
+                serial.printf("Angle Roll = %d\r\n", angle_roll);
+                serial.printf("Angle Pitch = %d\r\n", angle_pitch);
+                serial.printf("RPM = %d\r\n", RPM);
+                serial.printf("4x4 = %d\r\n", acopl_4x4.read());
+                serial.printf("switch state = %d\r\n", switch_state);
+                serial.printf("flags = %d\r\n", flags);
+                serial.printf("\n\n\n");
                 break;
         }
     }
@@ -403,7 +447,8 @@ void setupInterrupts()
 {
     /* General Interrupts */
     can.attach(&canISR, CAN::RxIrq);
-    freq_sensor.fall(&frequencyCounterISR);
+    freq_speed.fall(&freqCounterISRspeed);
+    freq_rpm.fall(&freqCounterISRrpm);
 
     /* Servo interrupts */
     choke_switch.rise(&servoSwitchISR);     // trigger throttle interrupt in both edges
@@ -428,11 +473,6 @@ void setupInterrupts()
 void filterMessage(CANMsg msg) 
 {
     led = !led;
-
-    if(msg.id==SPEED_ID)
-    {
-        msg >> data.speed;
-    }
 
     if(msg.id==TEMPERATURE_ID)
     {
@@ -577,12 +617,20 @@ void canISR()
     queue.call(&canHandler);                    // add canHandler() to events queue
 }
 
-void frequencyCounterISR()
+void freqCounterISRspeed()
+{
+    db = !db;
+    pulse_counterspeed++;
+    current_periodspeed += t.read_us() - last_countspeed;
+    last_countspeed = t.read_us();
+}
+
+void freqCounterISRrpm()
 {
     //db = !db;
-    pulse_counter++;
-    current_period += t.read_us() - last_count;
-    last_count = t.read_us();
+    pulse_counterrpm++;
+    current_periodrpm += t.read_us() - last_countrpm;
+    last_countrpm = t.read_us();
 }
 
 void servoSwitchISR()
@@ -611,6 +659,7 @@ void ticker1HzISR()
 
 void ticker5HzISR()
 {
+    state_buffer.push(SPEED_ST);
     state_buffer.push(RPM_ST);
     state_buffer.push(DISPLAY_ST);
     //state_buffer.push(DEBUG_ST);
