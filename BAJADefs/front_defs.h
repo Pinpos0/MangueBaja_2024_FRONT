@@ -4,8 +4,14 @@
 #include "mbed.h"
 #include "FIR.h"
 
+/* Wheel Definitions */
+#define PI                        3.1416
+#define WHEEL_DIAMETER            0.5842      // m
+//#define WHEEL_HOLES_NUMBER_MB1  24
+#define WHEEL_HOLES_NUMBER_REAR   12
+#define WHEEL_HOLES_NUMBER_FRONT  24
+
 /* IMU convertions */
-#define PI                  3.1416
 #define RAD_TO_DEGREE       180.0/PI
 #define TO_G                2.0/32768.0
 #define TO_DPS              245.0/32768.0
@@ -20,6 +26,7 @@
 
 typedef enum {
     IDLE_ST,        // wait
+    SPEED_ST,
     IMU_ST,         // Process the acceleration and angular velocity 
     RPM_ST,         // Process the RPM of Motor
     //RADIO_ST,
