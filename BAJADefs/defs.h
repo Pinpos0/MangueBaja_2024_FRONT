@@ -46,7 +46,6 @@ typedef struct
 {  
     imu_t imu;
     uint16_t rpm;
-    uint16_t speed;
     uint8_t tempMOTOR;
     uint8_t flags; // LOW_BATTERY | DANGER_CVT | DANGER_MOTOR | LOW_FUEL_LEVEL | MQTT_ON | SERVOR_ERROR | CHOKE | RUN -- LSB
     uint16_t fuel;
